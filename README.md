@@ -22,37 +22,48 @@
 ## Build
 
 ```bash
-ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=.zig-cache zig build
+zig build -Doptimize=ReleaseFast
 ```
 
 ## Run
 
 ```bash
-ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=.zig-cache \
-  zig build run -- --cidr 192.168.1.0/24
+./zig-out/bin/zigmap --ip 192.168.1.0/24
 ```
 
-Positional CIDR is also supported:
+Nmap-style target alias is also supported:
 
 ```bash
-ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=.zig-cache \
-  zig build run -- 192.168.1.0/24
+./zig-out/bin/zigmap -ip 192.168.1.0/24
 ```
 
-## Useful options
+Positional CIDR still works:
 
-- `--ports 1-1024` or `--ports all`
-- `--workers 256`
-- `--timeout-ms 150`
-- `--max-hosts 4096`
-- `--discovery-ports 22,80,443,445`
-- `--color` / `--no-color`
+```bash
+./zig-out/bin/zigmap 192.168.1.0/24
+```
+
+Optional: install into your PATH prefix:
+
+```bash
+zig build -Doptimize=ReleaseFast --prefix ~/.local
+~/.local/bin/zigmap --ip 192.168.1.0/24
+```
+
+## Useful flags
+
+- `--ip`, `--cidr`, `-i`, `-ip`
+- `--ports` / `-p` (example: `-p 1-1024` or `-p all`)
+- `--workers` / `-w`
+- `--timeout-ms` / `-t`
+- `--max-hosts` / `-m`
+- `--discovery-ports` / `-d`
+- `--color` / `-c` and `--no-color` / `-C`
 
 Example:
 
 ```bash
-ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=.zig-cache \
-  zig build run -- 10.0.0.0/24 --ports 1-1024 --workers 256 --timeout-ms 120
+./zig-out/bin/zigmap -ip 10.0.0.0/24 -p 1-1024 -w 256 -t 120
 ```
 
 ## Notes and limits
@@ -60,4 +71,5 @@ ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=.zig-cache \
 - This uses TCP connect scanning (no raw SYN scan).
 - Host discovery can miss hosts behind strict firewalls.
 - OS detection is heuristic, not full TCP/IP fingerprinting.
+- `zig build run -- ...` still works for development workflows.
 - Scan only networks you own or are explicitly authorized to test.

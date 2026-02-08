@@ -230,6 +230,28 @@ const ScanConfig = struct {
     color_mode: ColorMode,
 };
 
+const CliOptionId = enum(u8) {
+    help,
+    cidr,
+    ports,
+    workers,
+    timeout_ms,
+    max_hosts,
+    discovery_ports,
+    color,
+    no_color,
+};
+
+const CliOption = struct {
+    id: CliOptionId,
+    inline_value: ?[]const u8 = null,
+};
+
+const CliToken = union(enum) {
+    positional: []const u8,
+    option: CliOption,
+};
+
 const ParsedCidr = struct {
     network: u32,
     prefix: u8,
@@ -474,51 +496,180 @@ fn parseCliArgs(
 ) !void {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const arg = args[i][0..args[i].len];
-
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printUsage(out);
-            return error.HelpRequested;
-        } else if (std.mem.eql(u8, arg, "--cidr")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            config.cidr = args[i][0..args[i].len];
-        } else if (std.mem.eql(u8, arg, "--ports")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            config.ports = try parsePortRange(args[i][0..args[i].len]);
-        } else if (std.mem.eql(u8, arg, "--workers")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            config.workers = try std.fmt.parseUnsigned(usize, args[i][0..args[i].len], 10);
-            if (config.workers == 0) return error.InvalidWorkers;
-        } else if (std.mem.eql(u8, arg, "--timeout-ms")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            config.timeout_ms = try std.fmt.parseInt(i32, args[i][0..args[i].len], 10);
-            if (config.timeout_ms <= 0) return error.InvalidTimeout;
-        } else if (std.mem.eql(u8, arg, "--max-hosts")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            config.max_hosts = try std.fmt.parseUnsigned(usize, args[i][0..args[i].len], 10);
-            if (config.max_hosts == 0) return error.InvalidHostLimit;
-        } else if (std.mem.eql(u8, arg, "--discovery-ports")) {
-            i += 1;
-            if (i >= args.len) return error.MissingValue;
-            discovery_ports.clearRetainingCapacity();
-            try parseDiscoveryPorts(allocator, args[i][0..args[i].len], discovery_ports);
-        } else if (std.mem.eql(u8, arg, "--color")) {
-            config.color_mode = .always;
-        } else if (std.mem.eql(u8, arg, "--no-color")) {
-            config.color_mode = .never;
-        } else if (std.mem.startsWith(u8, arg, "--")) {
-            return error.UnknownArgument;
-        } else if (config.cidr.len == 0) {
-            config.cidr = arg;
-        } else {
-            return error.UnknownArgument;
+        const token = try parseCliToken(args[i][0..args[i].len]);
+        switch (token) {
+            .positional => |value| {
+                if (config.cidr.len == 0) {
+                    config.cidr = value;
+                } else {
+                    return error.UnknownArgument;
+                }
+            },
+            .option => |option| switch (option.id) {
+                .help => {
+                    try printUsage(out);
+                    return error.HelpRequested;
+                },
+                .cidr => {
+                    config.cidr = try takeCliValue(args, &i, option.inline_value);
+                },
+                .ports => {
+                    const raw = try takeCliValue(args, &i, option.inline_value);
+                    config.ports = try parsePortRange(raw);
+                },
+                .workers => {
+                    const raw = try takeCliValue(args, &i, option.inline_value);
+                    config.workers = try std.fmt.parseUnsigned(usize, raw, 10);
+                    if (config.workers == 0) return error.InvalidWorkers;
+                },
+                .timeout_ms => {
+                    const raw = try takeCliValue(args, &i, option.inline_value);
+                    config.timeout_ms = try std.fmt.parseInt(i32, raw, 10);
+                    if (config.timeout_ms <= 0) return error.InvalidTimeout;
+                },
+                .max_hosts => {
+                    const raw = try takeCliValue(args, &i, option.inline_value);
+                    config.max_hosts = try std.fmt.parseUnsigned(usize, raw, 10);
+                    if (config.max_hosts == 0) return error.InvalidHostLimit;
+                },
+                .discovery_ports => {
+                    const raw = try takeCliValue(args, &i, option.inline_value);
+                    discovery_ports.clearRetainingCapacity();
+                    try parseDiscoveryPorts(allocator, raw, discovery_ports);
+                },
+                .color => {
+                    config.color_mode = .always;
+                },
+                .no_color => {
+                    config.color_mode = .never;
+                },
+            },
         }
     }
+}
+
+fn parseCliToken(arg: []const u8) !CliToken {
+    if (arg.len == 0) return error.UnknownArgument;
+    if (!std.mem.startsWith(u8, arg, "-") or std.mem.eql(u8, arg, "-")) {
+        return .{ .positional = arg };
+    }
+
+    if (std.mem.eql(u8, arg, "--")) return error.UnknownArgument;
+
+    if (std.mem.startsWith(u8, arg, "--")) {
+        return .{ .option = try parseLongOption(arg[2..]) };
+    }
+
+    return .{ .option = try parseShortOption(arg) };
+}
+
+fn parseLongOption(raw: []const u8) !CliOption {
+    if (raw.len == 0) return error.UnknownArgument;
+
+    const eq_index = std.mem.indexOfScalar(u8, raw, '=');
+    const name = if (eq_index) |idx| raw[0..idx] else raw;
+    const inline_value = if (eq_index) |idx| raw[idx + 1 ..] else null;
+    if (name.len == 0) return error.UnknownArgument;
+
+    const id = parseLongOptionName(name) orelse return error.UnknownArgument;
+
+    switch (id) {
+        .help, .color, .no_color => {
+            if (inline_value != null) return error.UnexpectedValue;
+        },
+        else => {},
+    }
+
+    return .{
+        .id = id,
+        .inline_value = inline_value,
+    };
+}
+
+fn parseLongOptionName(name: []const u8) ?CliOptionId {
+    if (std.mem.eql(u8, name, "help")) return .help;
+    if (std.mem.eql(u8, name, "ip")) return .cidr;
+    if (std.mem.eql(u8, name, "cidr")) return .cidr;
+    if (std.mem.eql(u8, name, "network")) return .cidr;
+    if (std.mem.eql(u8, name, "ports")) return .ports;
+    if (std.mem.eql(u8, name, "workers")) return .workers;
+    if (std.mem.eql(u8, name, "threads")) return .workers;
+    if (std.mem.eql(u8, name, "timeout-ms")) return .timeout_ms;
+    if (std.mem.eql(u8, name, "timeout")) return .timeout_ms;
+    if (std.mem.eql(u8, name, "max-hosts")) return .max_hosts;
+    if (std.mem.eql(u8, name, "host-limit")) return .max_hosts;
+    if (std.mem.eql(u8, name, "discovery-ports")) return .discovery_ports;
+    if (std.mem.eql(u8, name, "discover-ports")) return .discovery_ports;
+    if (std.mem.eql(u8, name, "color")) return .color;
+    if (std.mem.eql(u8, name, "no-color")) return .no_color;
+    return null;
+}
+
+fn parseShortOption(arg: []const u8) !CliOption {
+    if (std.mem.eql(u8, arg, "-ip")) {
+        return .{ .id = .cidr };
+    }
+    if (std.mem.startsWith(u8, arg, "-ip=")) {
+        return .{
+            .id = .cidr,
+            .inline_value = arg[4..],
+        };
+    }
+    if (std.mem.startsWith(u8, arg, "-ip") and arg.len > 3) {
+        return .{
+            .id = .cidr,
+            .inline_value = arg[3..],
+        };
+    }
+
+    if (arg.len < 2 or arg[0] != '-') return error.UnknownArgument;
+
+    if (arg.len == 2) {
+        return parseSingleCharShortOption(arg[1], null);
+    }
+
+    if (arg[2] == '=') {
+        return parseSingleCharShortOption(arg[1], arg[3..]);
+    }
+
+    return parseSingleCharShortOption(arg[1], arg[2..]);
+}
+
+fn parseSingleCharShortOption(name: u8, inline_value: ?[]const u8) !CliOption {
+    switch (name) {
+        'h' => {
+            if (inline_value != null) return error.UnexpectedValue;
+            return .{ .id = .help };
+        },
+        'i' => return .{ .id = .cidr, .inline_value = inline_value },
+        'p' => return .{ .id = .ports, .inline_value = inline_value },
+        'w' => return .{ .id = .workers, .inline_value = inline_value },
+        't' => return .{ .id = .timeout_ms, .inline_value = inline_value },
+        'm' => return .{ .id = .max_hosts, .inline_value = inline_value },
+        'd' => return .{ .id = .discovery_ports, .inline_value = inline_value },
+        'c' => {
+            if (inline_value != null) return error.UnexpectedValue;
+            return .{ .id = .color };
+        },
+        'C' => {
+            if (inline_value != null) return error.UnexpectedValue;
+            return .{ .id = .no_color };
+        },
+        else => return error.UnknownArgument,
+    }
+}
+
+fn takeCliValue(args: []const [:0]u8, index: *usize, inline_value: ?[]const u8) ![]const u8 {
+    if (inline_value) |value| {
+        if (value.len == 0) return error.MissingValue;
+        return value;
+    }
+
+    index.* += 1;
+    if (index.* >= args.len) return error.MissingValue;
+    const value = args[index.*][0..args[index.*].len];
+    if (value.len == 0) return error.MissingValue;
+    return value;
 }
 
 fn parseDiscoveryPorts(
@@ -2474,24 +2625,29 @@ fn printUsage(out: anytype) !void {
         \\zigmap - slim local network mapper in Zig
         \\
         \\Usage:
-        \\  zig build run -- --cidr 192.168.1.0/24 [options]
-        \\  zig build run -- 192.168.1.0/24 [options]
+        \\  zigmap --ip 192.168.1.0/24 [options]
+        \\  zigmap -ip 192.168.1.0/24 [options]
+        \\  zigmap 192.168.1.0/24 [options]
         \\
         \\Options:
-        \\  --cidr <ipv4/prefix>       Target IPv4 CIDR (required if positional not used)
-        \\  --ports <start-end|all>    TCP ports to scan (default: all)
-        \\  --workers <n>              Concurrency level (default: auto)
-        \\  --timeout-ms <n>           Per-connection timeout in ms (default: 180)
-        \\  --max-hosts <n>            Cap scanned hosts from CIDR (default: 65536)
-        \\  --discovery-ports <list>   Comma-separated ports for host discovery
-        \\  --color                    Force ANSI color output
-        \\  --no-color                 Disable ANSI color output
+        \\  --ip, --cidr, --network, -i, -ip <ipv4/prefix>
+        \\                              Target IPv4 CIDR (required if positional not used)
+        \\  --ports, -p <start-end|all> TCP ports to scan (default: all)
+        \\  --workers, --threads, -w <n> Concurrency level (default: auto)
+        \\  --timeout-ms, --timeout, -t <n>
+        \\                              Per-connection timeout in ms (default: 180)
+        \\  --max-hosts, --host-limit, -m <n>
+        \\                              Cap scanned hosts from CIDR (default: 65536)
+        \\  --discovery-ports, --discover-ports, -d <list>
+        \\                              Comma-separated ports for host discovery
+        \\  --color, -c                Force ANSI color output
+        \\  --no-color, -C             Disable ANSI color output
         \\  -h, --help                 Show this help
         \\
         \\Examples:
-        \\  zig build run -- --cidr 192.168.1.0/24
-        \\  zig build run -- 10.0.0.0/24 --ports 1-1024 --workers 256 --color
-        \\  zig build run -- 172.16.1.0/24 --discovery-ports 22,80,443,445
+        \\  zigmap --ip 192.168.1.0/24
+        \\  zigmap -ip 10.0.0.0/24 -p 1-1024 -w 256 -c
+        \\  zigmap 172.16.1.0/24 --discover-ports 22,80,443,445
         \\
         \\Note:
         \\  Run only on networks you own or are explicitly authorized to test.
@@ -2532,6 +2688,41 @@ fn u32ToIp(ip_u32: u32) [4]u8 {
 
 fn ipToString(ip: [4]u8, buf: *[16]u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ ip[0], ip[1], ip[2], ip[3] });
+}
+
+test "parseCliToken supports ip aliases and inline values" {
+    const long_form = try parseCliToken("--ip=192.168.1.0/24");
+    switch (long_form) {
+        .option => |opt| {
+            try std.testing.expect(opt.id == .cidr);
+            try std.testing.expect(opt.inline_value != null);
+            try std.testing.expect(std.mem.eql(u8, opt.inline_value.?, "192.168.1.0/24"));
+        },
+        else => try std.testing.expect(false),
+    }
+
+    const short_form = try parseCliToken("-ip");
+    switch (short_form) {
+        .option => |opt| {
+            try std.testing.expect(opt.id == .cidr);
+            try std.testing.expect(opt.inline_value == null);
+        },
+        else => try std.testing.expect(false),
+    }
+
+    const compact_short = try parseCliToken("-p1-1024");
+    switch (compact_short) {
+        .option => |opt| {
+            try std.testing.expect(opt.id == .ports);
+            try std.testing.expect(opt.inline_value != null);
+            try std.testing.expect(std.mem.eql(u8, opt.inline_value.?, "1-1024"));
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "parseCliToken rejects invalid switch values" {
+    try std.testing.expectError(error.UnexpectedValue, parseCliToken("--color=always"));
 }
 
 test "parsePortRange all and range" {
