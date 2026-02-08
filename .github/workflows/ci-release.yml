@@ -1,0 +1,121 @@
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test (Zig 0.15.2)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
+
+  build-release-assets:
+    name: Build release (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-macos
+          - aarch64-macos
+          - x86_64-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build binary
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target="${{ matrix.target }}"
+          version="${GITHUB_REF_NAME}"
+          package_root="zigmap-${version}-${target}"
+          mkdir -p "package/${package_root}/data"
+
+          binary_name="zigmap"
+          archive_path="dist/${package_root}.tar.gz"
+          if [[ "${target}" == *"windows"* ]]; then
+            binary_name="zigmap.exe"
+            archive_path="dist/${package_root}.zip"
+          fi
+
+          cp "zig-out/bin/${binary_name}" "package/${package_root}/"
+          cp README.md "package/${package_root}/"
+          cp data/nmap-mac-prefixes "package/${package_root}/data/"
+
+          mkdir -p dist
+          if [[ "${archive_path}" == *.zip ]]; then
+            (
+              cd package
+              zip -r "../${archive_path}" "${package_root}"
+            )
+          else
+            tar -C package -czf "${archive_path}" "${package_root}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zigmap-${{ matrix.target }}
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-release-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: zigmap-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
